@@ -1,1 +1,1 @@
-# This is a tutorial repository of Aptos Blockchain.
+# This is a collection of aptos blockchain tutorials
