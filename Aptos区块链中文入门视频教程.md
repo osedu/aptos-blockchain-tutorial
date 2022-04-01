@@ -333,7 +333,149 @@ Aptos区块链使用拜占庭容错(BFT,Byzantine Fault Tolerance)共识协议�
 
 ## 交易的生命周期
 
-更新中。。。。
+从操作的角度来更深入的理解Aptos区块链上交易的生命周期：从一笔交易被提交给全节点（FullNode）到交易最终上链（即交易被提交到Aptos区块链上并确认交易完成）。
+
+### 假定前提
+
+- Alice和Bob在Aptos区块链分别有两个帐号（各自对应一个帐号地址）
+- Alice的帐号地址上有110个Aptos代币
+- Alice向Bob发送10个Aptos代币
+- Alice帐号当前的`sequence number`等于5.（5代表：Alice的账号地址已经发送出了5笔交易）
+- Aptos的区块链网络上目前总共有100个验证器（validator）节点：编号从V1到 V100
+- Aptos客户端（例如，自己编写的Python脚本）将Alice的交易提交给一个全节点的REST服务。这个全节点将这笔交易转发给一个验证器全节点（validator FullNode），验证器全节点再将交易转发给签证器V1
+  - Aptos client --> Public FullNode --> Validator FullNode ---> Validator Node (V1)
+
+- 验证器V1成为本笔交易的**提议者(proper)/领导者(leader)。**
+
+### 客户端构建并提交一笔交易
+
+我们将客户端构建的原始交易(raw transaction)表示为`Traw5`：
+
+- `Traw5`交易内容：==从Alice的账户中给Bob发送10个Aptos代币==。
+- Aptos客户端使用Alice的私钥对交易进行签名，签名后的交易用`T5`表示
+
+`T5`包括下面的内容：
+
+- 原始交易，即`Traw5`的内容
+- Alice的公钥（Alice's public key）
+- Alice的签名（signature）
+
+原始交易`Traw5`包括如下字段：
+
+| 字段(Fields)       | 描述(Description)                                            |
+| ------------------ | ------------------------------------------------------------ |
+| Account Address    | Alice的帐号地址                                              |
+| Move Module        | 交易要执行的具体操作，包括:1. 一个Move字节码点对点`transaction script`;2. `transaction script`的输入列表(本例为，Bob的帐号地址和发送的Aptos代币数量) |
+| Maximum gas amount | 交易允许支付的最大gas数量。Gas用于支付交易消耗的计算和存储费用。 |
+| Gas price          | Gas价格，即一个 gas 等于多少Aptos代币                        |
+| Expiration time    | 交易的过期时间，超过这个期限的交易不会上链                   |
+| Sequence number    | `sequence number`表示由本账户提交的（submitted）并且已经上链的（committed）交易数。本例中，Alice帐号地址已经提交了5笔交易（包括`Traw5`）. |
+| Chain ID           | Aptos网络标识符，防止跨网络攻击，`devnet`的`ChainID`是3      |
+
+> 关于`transaction script`：
+>
+> - 用户提交的每一笔交易都包含一个`transaction script`
+> - `transaction script`代表了表示客户端需要验证器执行的具体操作：
+>   - 具体操作可以是：１.转账操作；２.与以发布智能合约（Move模块）的交互
+> - `transaction script`是一个任意程序，通过调用一个模块的过程，与Aptos区块链全局存储中发布的资源进行交互。它对交易的逻辑进行编码。
+> - 一个`transaction script`可以向多个收款人发送资金，并从几个不同的模块调用过程。
+> - `transaction script`不存储在全局状态中，并且不能被其他`transaction script`调用。这是一个一次性程序。
+
+### 交易的生命周期
+
+本部分介绍`T5`交易的生命周期：从客户端提交交易到链上确认（committed）
+
+![交易生命周期图](https://aptos.dev/assets/images/validator-sequence-9ef2017c79e2949422c93ca446f5e3b9.svg)
+
+一笔交易的生命周期要经历如下5个阶段：
+
+1. Accepting：即全节点从Aptos客户端接受交易
+2. Sharing：与其他验证器节点共享交易
+3. Proposing：提出区块（Proposing the block）
+4. Executing and Consensus：执行区块并达成共识（Executing the block and reaching consensus）
+5. Committing：区块上链（Committing the block）
+
+下面详细介绍上面的5个阶段。
+
+#### Stage1：接受客户端的交易
+
+| 过程描述                                                     | Aptos节点组件交互              |
+| ------------------------------------------------------------ | ------------------------------ |
+| 1.**Client → REST service**: a. 客户机将T5交易提交给全节点的REST Service; b. 全节点将接收到的交易加入自己的内存池`mempool`,同时交易转发给网络中的其他节点; c. 交易最终将被转发到运行一台验证器全节点（validator Fullnode）上的`mempool`; d. 验证器全节点再将交易转发给一台验证器节点（validator node，本例中为V1`）. | 1. REST Service                |
+| 2.**REST service → Mempool**: 全节点的`REST Service`将`T5`交易传送给验证器节点`V1`的`mempool` | 2. REST Service, 1. Mempool    |
+| 3. **Mempool → Virtual Machine (VM)**:Mempool将使用虚拟机(VM)组件来执行事务验证，例如签名验证、帐户余额验证、基于`sequence number`的抗重放攻击。 | 4. Mempool, 3. Virtual Machine |
+
+#### Stage2：其他验证器节点共享交易
+
+| 过程描述                                                     | 对应的Aptos节点组件交互 |
+| ------------------------------------------------------------ | ----------------------- |
+| 4. **Mempool**: `mempool`将 `T5`交易保存在内存中缓冲区（memory buffer）中。Mempool可能已经包含了从Alice地址发出的多笔交易。 | Mempool                 |
+| 5. **Mempool → Other Validators**: 验证器节点V1将使用共享内存池协议`shared-mempool protocol`, 将其内存池中的交易 (including T5) 共享给其他验证器节点，并且把从其他验证器节点接收到的交易放入自己的`mempool` | 2. Mempool              |
+
+#### Stage3：提出区块（Proposing the block）
+
+| 过程描述                                                     | 对应的Aptos节点组件交互  |
+| ------------------------------------------------------------ | ------------------------ |
+| 6. **Consensus → Mempool**: — 验证器节点V1作为T5交易的提议者(proper)/领导者(leader), 它从自己的mempool中拉取一个交易区块，并且通过共识组件（consensus component）将此区块作为一项提议复制给其他验证器节点。it will pull a block of transactions from its mempool and replicate this block as a proposal to other validator nodes via its consensus component. | 1. Consensus, 3. Mempool |
+| 7. **Consensus → Other Validators**: :V1的共识组件负责协调所有验证器就提议区块的交易顺序达成共识。 | 2. Consensus             |
+
+#### Stage4：执行区块并达成共识
+
+| 过程描述                                                     | 对应的Aptos节点组件交互          |
+| ------------------------------------------------------------ | -------------------------------- |
+| 8. **Consensus → Execution**: 交易区块（块内包括`T5`和其他交易）被共享给执行组件（execution component） | 3. Consensus, 1. Execution       |
+| 9. **Execution → Virtual Machine**: 执行组件管理VM中交易的执行。这里的执行是speculatively 发生在区块中的交易达成一致之前。Note that this execution happens speculatively before the transactions in the block have been agreed upon. | 2. Execution, 3. Virtual Machine |
+| 10. **Consensus → Execution**: 执行完区块中的交易之后，执行组件把这些区块中的交易（包括`T5`）追加到Merkle accumulator（of ledger history）。这是一个内存/临时（in-memory/temporary）版本的Merkle累加器。执行这些交易的提议/推测结果的必要部分被返回到共识组件以达成一致（The necessary part of the proposed/speculative result of executing these transactions is returned to the consensus component to agree on.） 由从 "consensus" 到 "execution" 的箭头表示：执行交易的请求是由共识组件发起的。 | 3. Consensus                     |
+| 11. **Consensus → Other Validators**: V1 (the consensus leader) attempts to reach consensus on the proposed block's execution result with the other validator nodes participating in consensus. `V1`(the consensus leader)尝试和其他参与共识的验证器节点，在V1提议的区块的执行结果上达成共识。 | 3. Consensus                     |
+
+#### Stage5：区块上链
+
+| 过程描述                                                     | 对应的Aptos节点组件交互                              |
+| ------------------------------------------------------------ | ---------------------------------------------------- |
+| 12. **Consensus → Execution**, **Execution → Storage**: 如果`V1`提议的区块的执行结果被达成了共识，并且签名的验证器节点数目达到法定的投票数目，`V1`的执行组件从`speculative execution cache`中读取建议区块的所有执行结果，这些结果与建议区块中的所有交易信息都被持久化存储。If the proposed block's execution result is agreed upon and signed by a set of validators that have the quorum of votes, validator V1's execution component reads the full result of the proposed block execution from the speculative execution cache and commits all the transactions in the proposed block to persistent storage with their results. | 4. Consensus, 3. Execution, 4. Execution, 3. Storage |
+
+至此，Alice的帐号中拥有100Aptos代币，她的`sequence number`将变成6. 如果`T5`交易被Bob重放的话，这笔交易将被拒绝，因为Alice帐号的`sequence number = 6`比`T5`交易中的`sequence number = 5`要大。
+
+### Aptos节点内相关组件之间的交互
+
+本部分对于理解Aptos系统内部的运作机制有帮助，并且有助于向Aptos区块链项目做贡献。
+
+这里，我们假设一个Aptos客户端提交一笔交易`TN`到一个验证器`VX`。
+
+交易生命周期中使用到的Aptos节点的核心组件如下：
+
+- FullNode
+  - REST Service
+- Validator node
+  - Mempool
+  - Consensus
+  - Execution
+  - Virtual Machine
+  - Storage
+
+#### REST Service
+
+客户端发出的任何请求：
+
+1. 首先，到达FullNode的REST服务。
+2. 然后，提交的交易被转发到validator FullNode
+3. 接着，validator fullnode再将其发送到validator node `VX`。
+
+##### 1.Client → REST Service
+
+客户端向Aptos FullNode的REST服务提交交易。
+
+##### 2.REST Service → Mempool
+
+REST服务将交易转发给validator FullNode，然后validator Fullnode将交易发送给validator node `VX`的`mempool`。
+
+只有当`TN`的`sequence number`大于或等于发送方账户的当前`sequence number`时，`mempool`才会接受交易`TN`(注意，为满足`sequence number`条件的交易不会被传递到consensus组件)。
+
+##### 3. REST Service → Storage
+
+
+
+
 
 ## 与Aptos区块链交互
 
